@@ -398,6 +398,14 @@ class BeanQueue:
                     ).all()
 
                     if executor is not None:
+                        # Commit dispatch changes (PROCESSING state) before worker threads start
+                        # This ensures:
+                        # 1. Worker threads see correct task state (PROCESSING, not PENDING)
+                        # 2. FOR UPDATE locks are released
+                        # 3. No transaction rollback on db.close()
+                        if tasks:
+                            db.commit()
+
                         # Process tasks concurrently using thread pool
                         futures = []
                         for task in tasks:
