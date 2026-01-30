@@ -163,3 +163,78 @@ def test_sequential_processing_backward_compatibility(db: Session, db_url: str):
 
     proc.kill()
     proc.join(3)
+
+
+def test_tasks_arriving_during_processing_run_concurrently(db: Session, db_url: str):
+    """Test that tasks arriving while others are processing get picked up immediately.
+
+    This simulates the scenario of two browser tabs submitting tasks - the second task
+    should start processing as soon as it's created, not wait for the first to complete.
+    """
+    # Worker with 3 threads, so we have capacity for concurrent tasks
+    proc = Process(
+        target=run_process_cmd_with_threads,
+        args=(db_url, 3, 5),  # 3 threads, batch size 5
+    )
+    proc.start()
+
+    # Give the worker time to start and begin polling
+    time.sleep(0.5)
+
+    # Submit first long-running task (simulates first browser tab)
+    task1 = slow_task.run(task_num=1, sleep_time=1.5)
+    db.add(task1)
+    db.commit()
+    task1_id = task1.id
+
+    # Wait a bit for task1 to start processing
+    time.sleep(0.3)
+
+    # Submit second long-running task (simulates second browser tab)
+    task2 = slow_task.run(task_num=2, sleep_time=1.5)
+    db.add(task2)
+    db.commit()
+    task2_id = task2.id
+
+    # Track when each task completes
+    task1_done_time = None
+    task2_done_time = None
+
+    begin = datetime.datetime.now()
+    while True:
+        db.expire_all()
+
+        t1 = db.query(models.Task).filter(models.Task.id == task1_id).one()
+        t2 = db.query(models.Task).filter(models.Task.id == task2_id).one()
+
+        if t1.state == models.TaskState.DONE and task1_done_time is None:
+            task1_done_time = datetime.datetime.now()
+        if t2.state == models.TaskState.DONE and task2_done_time is None:
+            task2_done_time = datetime.datetime.now()
+
+        if task1_done_time and task2_done_time:
+            break
+
+        delta = datetime.datetime.now() - begin
+        if delta.total_seconds() > 10:
+            raise TimeoutError(
+                f"Timeout waiting for tasks. Task1 state: {t1.state}, Task2 state: {t2.state}"
+            )
+        time.sleep(0.1)
+
+    # The key assertion: if tasks ran concurrently, they should finish close together
+    # Task2 was submitted 0.3s after task1, and both take 1.5s
+    # If concurrent: task2 finishes ~0.3s after task1 (within 0.5s tolerance)
+    # If sequential: task2 finishes ~1.5s after task1
+    completion_gap = abs((task2_done_time - task1_done_time).total_seconds())
+
+    # With concurrent processing, the gap should be around 0.3s (the delay between submissions)
+    # Allow up to 0.8s to account for scheduling overhead
+    assert completion_gap < 0.8, (
+        f"Tasks appear to have run sequentially! "
+        f"Completion gap: {completion_gap:.2f}s (expected < 0.8s for concurrent execution). "
+        f"Task1 done at {task1_done_time}, Task2 done at {task2_done_time}"
+    )
+
+    proc.kill()
+    proc.join(3)

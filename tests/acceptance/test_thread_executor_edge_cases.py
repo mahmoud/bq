@@ -12,13 +12,19 @@ from bq import models
 from bq.config import Config
 
 
-def run_process_cmd_with_threads(db_url: str, max_workers: int, batch_size: int):
+def run_process_cmd_with_threads(
+    db_url: str,
+    max_workers: int,
+    batch_size: int,
+    poll_timeout: int = 60,
+):
     """Run worker process with thread pool executor enabled."""
     app.config = Config(
         PROCESSOR_PACKAGES=["tests.acceptance.fixtures.thread_processors"],
         DATABASE_URL=db_url,
         MAX_WORKER_THREADS=max_workers,
         BATCH_SIZE=batch_size,
+        POLL_TIMEOUT=poll_timeout,
     )
     app.process_tasks(channels=("thread-tests",))
 
@@ -179,9 +185,10 @@ def test_thread_executor_more_tasks_than_threads(db: Session, db_url: str):
 
 def test_thread_executor_with_retry_policy(db: Session, db_url: str):
     """Test that retry policies work correctly with thread executor."""
+    # Use a short poll timeout so worker picks up rescheduled tasks quickly
     proc = Process(
         target=run_process_cmd_with_threads,
-        args=(db_url, 4, 8),
+        args=(db_url, 4, 8, 2),  # poll_timeout=2 seconds
     )
     proc.start()
 
