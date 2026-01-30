@@ -15,6 +15,15 @@ def slow_task(task: bq.Task, task_num: int, sleep_time: float):
 
 
 @app.processor(channel="thread-tests")
+def timed_task(task: bq.Task, task_num: int, sleep_time: float):
+    """A task that records its start and end times to prove concurrent execution."""
+    start_time = time.time()
+    time.sleep(sleep_time)
+    end_time = time.time()
+    return {"task_num": task_num, "start": start_time, "end": end_time}
+
+
+@app.processor(channel="thread-tests")
 def concurrent_task(task: bq.Task, value: int):
     """A task to test concurrent execution and session isolation."""
     # Simulate some work

@@ -5,10 +5,10 @@ import logging
 import platform
 import sys
 import threading
-import time
 import typing
-from collections import deque
+from concurrent.futures import FIRST_COMPLETED
 from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import wait as futures_wait
 from importlib.metadata import PackageNotFoundError
 from importlib.metadata import version
 from wsgiref.simple_server import make_server
@@ -360,23 +360,26 @@ class BeanQueue:
         """Process tasks using thread pool with continuous task feeding.
 
         This implementation continuously checks for completed futures and fetches new tasks
-        when there's capacity in the thread pool, rather than waiting for all futures in a
-        batch to complete before fetching more.
+        when there's capacity in the thread pool. It uses concurrent.futures.wait() to
+        properly detect ANY completed future, not just the first one submitted.
         """
         max_workers = self.config.MAX_WORKER_THREADS
         if max_workers == 0:
             max_workers = 10  # Default when set to auto
 
-        running_futures: deque = deque()
+        running_futures: set = set()
 
         while True:
-            # Clean up completed futures (non-blocking check)
-            while running_futures and running_futures[0].done():
-                f = running_futures.popleft()
-                try:
-                    f.result()  # Check for exceptions
-                except Exception as e:
-                    logger.error("Task processing failed: %s", e)
+            # Clean up ANY completed futures using wait() with zero timeout
+            if running_futures:
+                done, running_futures = futures_wait(
+                    running_futures, timeout=0, return_when=FIRST_COMPLETED
+                )
+                for f in done:
+                    try:
+                        f.result()
+                    except Exception as e:
+                        logger.error("Task processing failed: %s", e)
 
             # If we have capacity, fetch and submit more tasks
             capacity = max_workers - len(running_futures)
@@ -387,9 +390,15 @@ class BeanQueue:
                     limit=min(capacity, self.config.BATCH_SIZE),
                 ).all()
 
+                # Always commit to close the transaction and refresh the snapshot,
+                # so subsequent dispatch calls can see newly committed tasks
+                db.commit()
+
                 if tasks:
-                    # Commit dispatch changes (PROCESSING state) before worker threads start
-                    db.commit()
+                    logger.debug(
+                        "Dispatching %d tasks (running=%d, capacity=%d)",
+                        len(tasks), len(running_futures), capacity
+                    )
 
                     for task in tasks:
                         future = executor.submit(
@@ -397,11 +406,19 @@ class BeanQueue:
                             task.id,
                             registry,
                         )
-                        running_futures.append(future)
+                        running_futures.add(future)
 
-            # If we have running tasks, do a short sleep and continue checking
+            # If we have running tasks, wait briefly for any to complete then check for new tasks
             if running_futures:
-                time.sleep(0.01)
+                # Short wait - allows checking for new tasks frequently
+                done, running_futures = futures_wait(
+                    running_futures, timeout=0.05, return_when=FIRST_COMPLETED
+                )
+                for f in done:
+                    try:
+                        f.result()
+                    except Exception as e:
+                        logger.error("Task processing failed: %s", e)
                 continue
 
             # No running tasks and no new tasks found - poll for notifications
