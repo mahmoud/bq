@@ -1,5 +1,6 @@
 import time
 import datetime
+import threading
 
 import bq
 from bq.processors.retry_policies import DelayRetry
@@ -58,3 +59,10 @@ def retry_task(task: bq.Task, task_num: int, max_attempts: int):
     else:
         # Retry attempt - succeed
         return task_num * 3
+
+
+@app.processor(channel="thread-tests")
+def record_thread_name() -> str:
+    """Records the current thread name for debugging and testing."""
+    thread_name = threading.current_thread().name
+    return thread_name
