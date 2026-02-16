@@ -6,6 +6,9 @@ import platform
 import sys
 import threading
 import typing
+from concurrent.futures import FIRST_COMPLETED
+from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import wait as futures_wait
 from importlib.metadata import PackageNotFoundError
 from importlib.metadata import version
 from wsgiref.simple_server import make_server
@@ -16,6 +19,8 @@ from sqlalchemy import func
 from sqlalchemy.engine import create_engine
 from sqlalchemy.engine import Engine
 from sqlalchemy.orm import Session as DBSession
+from sqlalchemy.pool import NullPool
+from sqlalchemy.pool import QueuePool
 from sqlalchemy.pool import SingletonThreadPool
 
 from . import constants
@@ -67,9 +72,23 @@ class BeanQueue:
         self._metrics_server_shutdown: typing.Callable[[], None] = lambda: None
 
     def create_default_engine(self):
-        return create_engine(
-            str(self.config.DATABASE_URL), poolclass=SingletonThreadPool
-        )
+        # Use thread-safe connection pool when thread pool executor is enabled
+        if self.config.MAX_WORKER_THREADS != 1:
+            # QueuePool is thread-safe and suitable for multi-threaded usage
+            # Configure pool size based on number of worker threads
+            max_workers = self.config.MAX_WORKER_THREADS if self.config.MAX_WORKER_THREADS > 0 else 10
+            pool_size = max_workers + 5  # Extra connections for main thread and worker update thread
+            return create_engine(
+                str(self.config.DATABASE_URL),
+                poolclass=QueuePool,
+                pool_size=pool_size,
+                max_overflow=10,
+            )
+        else:
+            # SingletonThreadPool for single-threaded sequential processing
+            return create_engine(
+                str(self.config.DATABASE_URL), poolclass=SingletonThreadPool
+            )
 
     def make_session(self) -> DBSession:
         return self.session_cls(bind=self.engine)
@@ -256,6 +275,163 @@ class BeanQueue:
             logger.info("Run metrics HTTP server on %s:%s", host, port)
             httpd.serve_forever()
 
+    def _process_task_in_thread(
+        self,
+        task_id: typing.Any,
+        registry: typing.Any,
+    ):
+        """Process a single task in a thread-safe manner with its own database session.
+
+        This method is called from worker threads in the thread pool. It creates its own
+        database session to avoid SQLAlchemy session conflicts between threads.
+        """
+        db = self.make_session()
+        try:
+            # Reload the task in this thread's session to avoid SQLAlchemy context issues
+            task = db.query(self.task_model).filter(self.task_model.id == task_id).one()
+
+            logger.info(
+                "Processing task %s, channel=%s, module=%s, func=%s",
+                task.id,
+                task.channel,
+                task.module,
+                task.func_name,
+            )
+            registry.process(task, event_cls=self.event_model)
+            db.commit()
+        except Exception as e:
+            logger.exception("Error processing task %s: %s", task_id, e)
+            db.rollback()
+            raise
+        finally:
+            db.close()
+
+    def _process_tasks_sequential(
+        self,
+        db: DBSession,
+        dispatch_service: DispatchService,
+        registry: typing.Any,
+        channels: tuple[str, ...],
+        worker_id: typing.Any,
+    ):
+        """Process tasks sequentially (original behavior for MAX_WORKER_THREADS=1)."""
+        while True:
+            while True:
+                tasks = dispatch_service.dispatch(
+                    channels,
+                    worker_id=worker_id,
+                    limit=self.config.BATCH_SIZE,
+                ).all()
+
+                for task in tasks:
+                    logger.info(
+                        "Processing task %s, channel=%s, module=%s, func=%s",
+                        task.id,
+                        task.channel,
+                        task.module,
+                        task.func_name,
+                    )
+                    registry.process(task, event_cls=self.event_model)
+                if tasks:
+                    db.commit()
+
+                if not tasks:
+                    break
+
+            db.close()
+            try:
+                for notification in dispatch_service.poll(
+                    timeout=self.config.POLL_TIMEOUT
+                ):
+                    logger.debug("Receive notification %s", notification)
+            except TimeoutError:
+                logger.debug("Poll timeout, try again")
+                continue
+
+    def _process_tasks_threaded(
+        self,
+        db: DBSession,
+        executor: ThreadPoolExecutor,
+        dispatch_service: DispatchService,
+        registry: typing.Any,
+        channels: tuple[str, ...],
+        worker_id: typing.Any,
+    ):
+        """Process tasks using thread pool with continuous task feeding.
+
+        This implementation continuously checks for completed futures and fetches new tasks
+        when there's capacity in the thread pool. It uses concurrent.futures.wait() to
+        properly detect ANY completed future, not just the first one submitted.
+        """
+        max_workers = self.config.MAX_WORKER_THREADS
+        if max_workers == 0:
+            max_workers = 10  # Default when set to auto
+
+        running_futures: set = set()
+
+        while True:
+            # Clean up ANY completed futures using wait() with zero timeout
+            if running_futures:
+                done, running_futures = futures_wait(
+                    running_futures, timeout=0, return_when=FIRST_COMPLETED
+                )
+                for f in done:
+                    try:
+                        f.result()
+                    except Exception as e:
+                        logger.error("Task processing failed: %s", e)
+
+            # If we have capacity, fetch and submit more tasks
+            capacity = max_workers - len(running_futures)
+            if capacity > 0:
+                tasks = dispatch_service.dispatch(
+                    channels,
+                    worker_id=worker_id,
+                    limit=min(capacity, self.config.BATCH_SIZE),
+                ).all()
+
+                # Always commit to close the transaction and refresh the snapshot,
+                # so subsequent dispatch calls can see newly committed tasks
+                db.commit()
+
+                if tasks:
+                    logger.debug(
+                        "Dispatching %d tasks (running=%d, capacity=%d)",
+                        len(tasks), len(running_futures), capacity
+                    )
+
+                    for task in tasks:
+                        future = executor.submit(
+                            self._process_task_in_thread,
+                            task.id,
+                            registry,
+                        )
+                        running_futures.add(future)
+
+            # If we have running tasks, wait briefly for any to complete then check for new tasks
+            if running_futures:
+                # Short wait - allows checking for new tasks frequently
+                done, running_futures = futures_wait(
+                    running_futures, timeout=0.05, return_when=FIRST_COMPLETED
+                )
+                for f in done:
+                    try:
+                        f.result()
+                    except Exception as e:
+                        logger.error("Task processing failed: %s", e)
+                continue
+
+            # No running tasks and no new tasks found - poll for notifications
+            db.close()
+            try:
+                for notification in dispatch_service.poll(
+                    timeout=self.config.POLL_TIMEOUT
+                ):
+                    logger.debug("Receive notification %s", notification)
+            except TimeoutError:
+                logger.debug("Poll timeout, try again")
+                continue
+
     def process_tasks(
         self,
         channels: tuple[str, ...],
@@ -329,43 +505,47 @@ class BeanQueue:
 
         worker_id = worker.id
 
+        # Determine the number of worker threads
+        max_workers = self.config.MAX_WORKER_THREADS
+        if max_workers == 0:
+            max_workers = None  # Default to (num_cpus * 5)
+
+        # Create thread pool executor for concurrent task processing
+        executor = None
+        if max_workers != 1:
+            executor = ThreadPoolExecutor(max_workers=max_workers, thread_name_prefix="task_worker")
+            logger.info("Created thread pool executor with max_workers=%s", max_workers)
+
         try:
-            while True:
-                while True:
-                    tasks = dispatch_service.dispatch(
-                        channels,
-                        worker_id=worker_id,
-                        limit=self.config.BATCH_SIZE,
-                    ).all()
-                    for task in tasks:
-                        logger.info(
-                            "Processing task %s, channel=%s, module=%s, func=%s",
-                            task.id,
-                            task.channel,
-                            task.module,
-                            task.func_name,
-                        )
-                        # TODO: support processor pool and other approaches to dispatch the workload
-                        registry.process(task, event_cls=self.event_model)
-                    if not tasks:
-                        # we should try to keep dispatching until we cannot find tasks
-                        break
-                    else:
-                        db.commit()
-                # we will not see notifications in a transaction, need to close the transaction first before entering
-                # polling
-                db.close()
-                try:
-                    for notification in dispatch_service.poll(
-                        timeout=self.config.POLL_TIMEOUT
-                    ):
-                        logger.debug("Receive notification %s", notification)
-                except TimeoutError:
-                    logger.debug("Poll timeout, try again")
-                    continue
+            if executor is not None:
+                # Threaded processing with continuous task feeding
+                self._process_tasks_threaded(
+                    db=db,
+                    executor=executor,
+                    dispatch_service=dispatch_service,
+                    registry=registry,
+                    channels=channels,
+                    worker_id=worker_id,
+                )
+            else:
+                # Sequential processing (original behavior)
+                self._process_tasks_sequential(
+                    db=db,
+                    dispatch_service=dispatch_service,
+                    registry=registry,
+                    channels=channels,
+                    worker_id=worker_id,
+                )
         except (SystemExit, KeyboardInterrupt):
             db.rollback()
             logger.info("Shutting down ...")
+
+            # Shutdown the executor if it was created
+            if executor is not None:
+                logger.info("Shutting down thread pool executor...")
+                executor.shutdown(wait=True, cancel_futures=False)
+                logger.info("Thread pool executor shutdown complete")
+
             self._worker_update_shutdown_event.set()
             worker_update_thread.join(5)
             if metrics_server_thread is not None:
