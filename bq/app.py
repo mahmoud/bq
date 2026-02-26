@@ -1,3 +1,4 @@
+import socketserver
 import functools
 import importlib
 import json
@@ -13,6 +14,7 @@ from importlib.metadata import PackageNotFoundError
 from importlib.metadata import version
 from wsgiref.simple_server import make_server
 from wsgiref.simple_server import WSGIRequestHandler
+from wsgiref.simple_server import WSGIServer
 
 import venusian
 from sqlalchemy import func
@@ -53,6 +55,10 @@ class WSGIRequestHandlerWithLogger(WSGIRequestHandler):
         )
 
 
+
+class ThreadingWSGIServer(socketserver.ThreadingMixIn, WSGIServer):
+    daemon_threads = True
+
 class BeanQueue:
     def __init__(
         self,
@@ -70,6 +76,8 @@ class BeanQueue:
         self._worker_update_shutdown_event: threading.Event = threading.Event()
         # noop if metrics thread is not started yet, shutdown if it is started
         self._metrics_server_shutdown: typing.Callable[[], None] = lambda: None
+        self._health_ok: bool = False
+        self._health_info: dict = {}
 
     def create_default_engine(self):
         # Use thread-safe connection pool when thread pool executor is enabled
@@ -195,6 +203,10 @@ class BeanQueue:
                 db.commit()
 
             if current_worker.state != models.WorkerState.RUNNING:
+                self._health_ok = False
+                self._health_info = {
+                    "state": str(current_worker.state),
+                }
                 # This probably means we are somehow very slow to update the heartbeat in time, or the timeout window
                 # is set too short. It could also be the administrator update the worker state to something else than
                 # RUNNING. Regardless the reason, let's stop processing.
@@ -203,6 +215,7 @@ class BeanQueue:
                     current_worker.id,
                     current_worker.state,
                 )
+                self._health_ok = False
                 sys.exit(0)
 
             do_shutdown = self._worker_update_shutdown_event.wait(
@@ -214,51 +227,34 @@ class BeanQueue:
             current_worker.last_heartbeat = func.now()
             db.add(current_worker)
             db.commit()
+            self._health_ok = (current_worker.state == models.WorkerState.RUNNING)
+            self._health_info = {
+                "state": str(current_worker.state),
+            }
 
     def _serve_http_request(
         self, worker_id: typing.Any, environ: dict, start_response: typing.Callable
     ) -> list[bytes]:
         path = environ["PATH_INFO"]
         if path == "/healthz":
-            db = self.make_session()
-            worker_service = self._make_worker_service(db)
-            worker = worker_service.get_worker(worker_id)
-            if worker is not None and worker.state == models.WorkerState.RUNNING:
-                start_response(
-                    "200 OK",
-                    [
-                        ("Content-Type", "application/json"),
-                    ],
-                )
-                return [
-                    json.dumps(dict(status="ok", worker_id=str(worker_id))).encode(
-                        "utf8"
-                    )
-                ]
+            if self._health_ok:
+                start_response("200 OK", [("Content-Type", "application/json")])
+                return [json.dumps(dict(
+                    status="ok",
+                    worker_id=str(worker_id),
+                    **self._health_info,
+                )).encode("utf8")]
             else:
-                logger.warning("Bad worker %s state %s", worker_id, worker.state)
                 start_response(
                     "500 Internal Server Error",
-                    [
-                        ("Content-Type", "application/json"),
-                    ],
+                    [("Content-Type", "application/json")],
                 )
-                return [
-                    json.dumps(
-                        dict(
-                            status="internal error",
-                            worker_id=str(worker_id),
-                            state=str(worker.state),
-                        )
-                    ).encode("utf8")
-                ]
-        # TODO: add other metrics endpoints
-        start_response(
-            "404 NOT FOUND",
-            [
-                ("Content-Type", "application/json"),
-            ],
-        )
+                return [json.dumps(dict(
+                    status="error",
+                    worker_id=str(worker_id),
+                    **self._health_info,
+                )).encode("utf8")]
+        start_response("404 NOT FOUND", [("Content-Type", "application/json")])
         return [json.dumps(dict(status="not found")).encode("utf8")]
 
     def run_metrics_http_server(self, worker_id: typing.Any):
@@ -269,6 +265,7 @@ class BeanQueue:
             port,
             functools.partial(self._serve_http_request, worker_id),
             handler_class=WSGIRequestHandlerWithLogger,
+            server_class=ThreadingWSGIServer,
         ) as httpd:
             # expose graceful shutdown to the main thread
             self._metrics_server_shutdown = httpd.shutdown
@@ -475,6 +472,8 @@ class BeanQueue:
         db.add(worker)
         dispatch_service.listen(channels)
         db.commit()
+        self._health_ok = True
+        self._health_info = {"state": "RUNNING"}
 
         metrics_server_thread = None
         if self.config.METRICS_HTTP_SERVER_ENABLED:
