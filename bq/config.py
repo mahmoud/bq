@@ -14,12 +14,12 @@ class Config(BaseSettings):
     PROCESSOR_PACKAGES: list[str] = Field(default_factory=list)
 
     # Size of tasks batch to fetch each time from the database
-    BATCH_SIZE: int = 1
+    BATCH_SIZE: int = Field(default=1, ge=1)
 
     # Maximum number of worker threads for concurrent task processing
     # Set to 1 to disable thread pool and process tasks sequentially
-    # Set to 0 to use the default (number of CPUs * 5)
-    MAX_WORKER_THREADS: int = 1
+    # Set to 0 to use the default: min(32, cpu_count + 4), matching ThreadPoolExecutor
+    MAX_WORKER_THREADS: int = Field(default=1, ge=0)
 
     # How long we should poll before timeout in seconds
     POLL_TIMEOUT: int = 60
