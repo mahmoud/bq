@@ -1,6 +1,7 @@
 import dataclasses
 import select
 import typing
+from typing import Optional
 import uuid
 
 from sqlalchemy import func
@@ -77,14 +78,14 @@ class DispatchService:
             self.task_model.id.in_(task_ids)
         )
 
-    def listen(self, channels: typing.Sequence[str]):
-        conn = self.session.connection()
+    def listen(self, channels: typing.Sequence[str], connection=None):
+        conn = connection if connection is not None else self.session.connection()
         for channel in channels:
             quoted_channel = conn.dialect.identifier_preparer.quote_identifier(channel)
             conn.exec_driver_sql(f"LISTEN {quoted_channel}")
 
-    def poll(self, timeout: int = 5) -> typing.Generator[Notification, None, None]:
-        conn = self.session.connection()
+    def poll(self, timeout: int = 5, connection=None) -> typing.Generator[Notification, None, None]:
+        conn = connection if connection is not None else self.session.connection()
         driver_conn = conn.connection.driver_connection
 
         def pop_notifies():

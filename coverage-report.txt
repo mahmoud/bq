@@ -1,0 +1,33 @@
+Name                              Stmts   Miss Branch BrPart  Cover   Missing
+-----------------------------------------------------------------------------
+bq/__init__.py                       19      0      0      0 100.0%
+bq/app.py                           375     56     74      7  85.5%   104->exit, 113-114, 132, 146, 182, 244-257, 280-286, 362-364, 375-401, 451-458, 488-489, 540-541, 549, 553-554, 663-664
+bq/cmds/__init__.py                   0      0      0      0 100.0%
+bq/cmds/cli.py                       23     23      2      0   0.0%   1-53
+bq/cmds/create_tables.py             10     10      0      0   0.0%   1-12
+bq/cmds/environment.py               20     20      0      0   0.0%   1-36
+bq/cmds/main.py                       7      7      2      0   0.0%   1-9
+bq/cmds/process.py                    9      9      0      0   0.0%   1-15
+bq/cmds/submit.py                    21     21      2      0   0.0%   1-42
+bq/cmds/utils.py                     10     10      2      0   0.0%   1-14
+bq/config.py                         40      2     10      1  90.0%   75-76
+bq/constants.py                       2      0      0      0 100.0%
+bq/db/__init__.py                     0      0      0      0 100.0%
+bq/db/base.py                         3      0      0      0 100.0%
+bq/db/session.py                      4      0      0      0 100.0%
+bq/events.py                          3      0      0      0 100.0%
+bq/models/__init__.py                14      0      0      0 100.0%
+bq/models/event.py                   36      2      0      0  94.4%   70-76
+bq/models/helpers.py                  3      1      0      0  66.7%   5
+bq/models/task.py                    88      2     12      1  97.0%   126-133, 139->152
+bq/models/worker.py                  35      2      0      0  94.3%   73-79
+bq/processors/__init__.py             0      0      0      0 100.0%
+bq/processors/processor.py           78      3     18      3  93.8%   44, 57->71, 61, 107
+bq/processors/registry.py            36      8      8      2  72.7%   31-47, 52->54
+bq/processors/retry_policies.py      34      0      2      0 100.0%
+bq/services/__init__.py               0      0      0      0 100.0%
+bq/services/dispatch.py              53      0     10      0 100.0%
+bq/services/worker.py                33      0      0      0 100.0%
+bq/utils.py                           6      0      0      0 100.0%
+-----------------------------------------------------------------------------
+TOTAL                               962    176    142     14  81.5%

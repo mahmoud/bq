@@ -216,6 +216,21 @@ Or if you prefer to define your own process command, you can also call `process_
 app.process_tasks(channels=("images",))
 ```
 
+### Concurrency
+
+BeanQueue supports concurrent task processing via a thread pool.
+
+- **`MAX_WORKER_THREADS`** (default `1`): Set to `1` for sequential processing (original behavior). Set to `N > 1` to process up to N tasks concurrently using a `ThreadPoolExecutor`. Set to `0` for automatic sizing: `min(32, cpu_count + 4)`, matching Python's `ThreadPoolExecutor` default.
+- **`BATCH_SIZE`** (default `1`): Maximum number of tasks to dispatch per query. Each dispatch round fetches `min(free_threads, BATCH_SIZE)` tasks. Set higher for throughput with many short tasks; lower for fairness across channels.
+
+Each worker thread gets its own SQLAlchemy `Session` — processors must be thread-safe with respect to their own shared state, but each invocation receives an independent database session.
+
+**Delivery semantics**: BeanQueue provides **at-least-once execution** with **exactly-once completion marking**. A task claim (`PENDING` → `PROCESSING` via `FOR UPDATE SKIP LOCKED`) is committed immediately, so two live workers can never claim the same task. If a worker dies mid-task, the task stays `PROCESSING` until a peer notices the missing heartbeat (`WORKER_HEARTBEAT_TIMEOUT`), marks the worker `NO_HEARTBEAT`, and resets its tasks to `PENDING` — the task is then re-executed from the start. Design your processors to be idempotent or to tolerate re-execution after a crash.
+
+**Graceful shutdown**: Send `SIGINT` / `SIGTERM` (raises `KeyboardInterrupt`), or call `app.request_shutdown()` for in-process control. The worker drains in-flight tasks (waits for running threads to finish), reschedules any remaining dispatched tasks back to `PENDING`, marks the worker row as `SHUTDOWN`, and exits. Worst-case shutdown reaction latency is one `POLL_TIMEOUT` period.
+
+**Health endpoint**: When `METRICS_HTTP_SERVER_ENABLED=True`, a threaded WSGI server exposes `/healthz` on `METRICS_HTTP_SERVER_PORT` (default `8000`). The endpoint reads in-memory health state — no database queries on the request path. It returns `200` while the worker is running and `500` during shutdown or on heartbeat failure.
+
 ### Define your own tables
 
 BeanQueue is designed to be as customizable as much as possible.
@@ -301,6 +316,28 @@ config = bq.Config(
 )
 app = bq.BeanQueue(config)
 ```
+
+## Development
+
+The canonical test run is dockerized and collects coverage across the
+suite's full process topology (pytest process, worker threads,
+multiprocessing and subprocess workers):
+
+```bash
+docker compose run --rm test              # full suite + coverage report
+docker compose run --rm test tests/unit   # subset
+```
+
+`PG_VERSION` / `PYTHON_VERSION` environment variables parameterize the
+PostgreSQL image and the test image's Python. Bare `uv run pytest` still
+works for fast iteration against the compose PostgreSQL (no coverage
+overhead).
+
+Destructive environment-touching tests (e.g. restarting the PostgreSQL
+container) are marked `chaos` and excluded by default; run them from the
+host with `uv run pytest -m chaos`. The torture test prints its seed and
+replays with `BQ_TORTURE_SEED=<seed>`. A soak/latency harness lives in
+`scripts/soak.py` (see its docstring for the dockerized invocation).
 
 ## Why?
 

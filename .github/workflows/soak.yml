@@ -1,0 +1,30 @@
+# Nightly soak + latency run. NOTE: GitHub only triggers schedule/
+# workflow_dispatch once this file exists on the repository's DEFAULT
+# branch — until the branch carrying it merges, run it manually from the
+# Actions tab after the file reaches master, or locally via:
+#   docker compose run --rm --entrypoint "" test uv run python scripts/soak.py \
+#     --db-url postgresql://bq:@psql/bq_test --tasks 5000 --workers 2
+name: soak
+on:
+  schedule:
+    - cron: "0 6 * * *"
+  workflow_dispatch: {}
+jobs:
+  soak:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: docker compose build test
+      - name: Run soak
+        run: |
+          docker compose run --rm --entrypoint "" test \
+            uv run python scripts/soak.py \
+            --db-url postgresql://bq:@psql/bq_test --tasks 5000 --workers 2 \
+            | tee soak-report.txt
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: soak-report
+          path: soak-report.txt
+      - run: docker compose down -v
+        if: always()

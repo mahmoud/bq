@@ -21,7 +21,10 @@ bq = "bq.cmds.main:cli"
 [dependency-groups]
 dev = [
     "psycopg2-binary>=2.9.10,<3",
+    "pytest>=8,<9",
     "pytest-factoryboy>=2.7.0,<3",
+    "pytest-timeout>=2,<3",
+    "coverage>=7.10,<8",
 ]
 
 [tool.hatch.build.targets.sdist]
@@ -36,3 +39,23 @@ build-backend = "hatchling.build"
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
+timeout = 120
+markers = [
+    "chaos: destructive/environment-touching tests, excluded by default",
+]
+addopts = "-m 'not chaos'"
+
+[tool.coverage.run]
+source = ["bq"]
+branch = true
+parallel = true
+sigterm = true
+concurrency = ["thread", "multiprocessing"]
+patch = ["subprocess"]
+
+[tool.coverage.report]
+precision = 1
+show_missing = true
+
+[tool.coverage.paths]
+source = ["bq", "/app/bq"]

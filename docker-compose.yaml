@@ -6,7 +6,7 @@ services:
       POSTGRES_PASSWORD: ""
       POSTGRES_USER: "bq"
       POSTGRES_DB: "bq"
-    image: "postgres:16.3"
+    image: "postgres:${PG_VERSION:-16.3}"
     ports:
     - "5432:5432"
     volumes:
@@ -17,5 +17,19 @@ services:
       interval: 5s
       timeout: 5s
       retries: 10
+  test:
+    build:
+      context: .
+      dockerfile: Dockerfile.test
+      args:
+        PYTHON_VERSION: "${PYTHON_VERSION:-3.11}"
+    environment:
+      TEST_DB_URL: "postgresql://bq:@psql/bq_test"
+    volumes:
+      - .:/app
+    depends_on:
+      psql:
+        condition: service_healthy
+    profiles: ["test"]
 volumes:
   psqldata:

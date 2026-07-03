@@ -8,6 +8,7 @@ from sqlalchemy.orm import Session
 from .fixtures.thread_processors import app
 from .fixtures.thread_processors import failing_task
 from .fixtures.thread_processors import retry_task
+from .helpers import stop_process
 from bq import models
 from bq.config import Config
 
@@ -89,8 +90,7 @@ def test_thread_executor_with_failing_tasks(db: Session, db_url: str):
         assert task.error_message is not None
         assert "Intentional failure" in task.error_message
 
-    proc.kill()
-    proc.join(3)
+    stop_process(proc)
 
 
 def test_thread_executor_more_threads_than_tasks(db: Session, db_url: str):
@@ -128,8 +128,7 @@ def test_thread_executor_more_threads_than_tasks(db: Session, db_url: str):
     # All tasks should complete successfully
     assert done_tasks == task_count
 
-    proc.kill()
-    proc.join(3)
+    stop_process(proc)
 
 
 def test_thread_executor_more_tasks_than_threads(db: Session, db_url: str):
@@ -179,8 +178,7 @@ def test_thread_executor_more_tasks_than_threads(db: Session, db_url: str):
         expected_result = task.kwargs["task_num"] * 2
         assert task.result == expected_result
 
-    proc.kill()
-    proc.join(3)
+    stop_process(proc)
 
 
 def test_thread_executor_with_retry_policy(db: Session, db_url: str):
@@ -229,8 +227,7 @@ def test_thread_executor_with_retry_policy(db: Session, db_url: str):
     # All tasks should eventually succeed after retry
     assert done_tasks == task_count
 
-    proc.kill()
-    proc.join(3)
+    stop_process(proc)
 
 
 def test_thread_executor_task_state_transitions(db: Session, db_url: str):
@@ -306,5 +303,4 @@ def test_thread_executor_task_state_transitions(db: Session, db_url: str):
     )
     assert processing_count == 0, "All tasks should transition from PROCESSING to DONE"
 
-    proc.kill()
-    proc.join(3)
+    stop_process(proc)
