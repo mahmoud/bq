@@ -12,6 +12,7 @@ from bq.db.base import Base
 from bq.processors.registry import collect
 
 from .fixtures.custom_models import custom_processor
+from .helpers import wait_for_task_state
 
 
 def _make_custom_app(db_url, max_workers=3):
@@ -52,23 +53,7 @@ def test_custom_models_threaded_e2e(db, db_url):
     db.commit()
 
     # Wait for all tasks to complete
-    engine = create_engine(db_url)
-    try:
-        deadline = time.monotonic() + 30
-        done = 0
-        while time.monotonic() < deadline:
-            with engine.connect() as conn:
-                result = conn.execute(text(
-                    f"SELECT count(*) FROM {models.Task.__tablename__} WHERE state = 'DONE'"
-                ))
-                done = result.scalar()
-                if done >= task_count:
-                    break
-            time.sleep(0.5)
-        else:
-            raise TimeoutError(f"Only {done}/{task_count} tasks completed")
-    finally:
-        engine.dispose()
+    wait_for_task_state(db_url, models.TaskState.DONE, task_count, timeout=30)
 
     # Verify all tasks are DONE and events created
     db.expire_all()

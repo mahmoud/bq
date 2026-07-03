@@ -10,7 +10,8 @@ from bq import models
 from bq.app import BeanQueue
 from bq.config import Config
 
-from .fixtures.thread_processors import slow_task, concurrent_task
+from .fixtures.thread_processors import concurrent_task, gated_task, open_gate
+from .helpers import wait_for_task_state
 
 
 def _make_app(db_url, max_workers=2, poll_timeout=1, **overrides):
@@ -28,50 +29,28 @@ def _make_app(db_url, max_workers=2, poll_timeout=1, **overrides):
     return BeanQueue(config=Config(**defaults))
 
 
-def _wait_for_state(db_url, task_model, state, count, timeout=30):
-    engine = create_engine(db_url)
-    deadline = time.monotonic() + timeout
-    n = 0
-    while time.monotonic() < deadline:
-        with engine.connect() as conn:
-            result = conn.execute(
-                text(f"SELECT count(*) FROM {task_model.__tablename__} WHERE state = :s"),
-                {"s": state.value},
-            )
-            n = result.scalar()
-            if n >= count:
-                engine.dispose()
-                return n
-        time.sleep(0.3)
-    engine.dispose()
-    raise TimeoutError(f"Only {n}/{count} tasks reached {state} within {timeout}s")
-
-
 def _wait_processing(db_url, count, timeout=30):
     """Wait until at least `count` tasks are PROCESSING."""
-    return _wait_for_state(db_url, models.Task, models.TaskState.PROCESSING, count, timeout)
+    return wait_for_task_state(db_url, models.TaskState.PROCESSING, count, timeout)
 
 
 def test_graceful_shutdown_drains_inflight(db, db_url, run_worker):
-    """Shutdown drains in-flight tasks but leaves pending ones for rescheduling."""
+    """Shutdown drains in-flight tasks to completion (deterministic via gates)."""
     app = _make_app(db_url, max_workers=2)
 
-    # Create 2 slow tasks (will be in-flight) + 3 fast pending
-    for i in range(2):
-        task = slow_task.run(task_num=i, sleep_time=2.0)
-        db.add(task)
-    for i in range(3):
-        task = concurrent_task.run(value=i)
-        db.add(task)
+    # Two gated tasks occupy both worker threads, held in-flight by the gate
+    for _ in range(2):
+        db.add(gated_task.run(gate="graceful-shutdown"))
     db.commit()
 
     t = run_worker(app, ("thread-tests",))
 
-    # Wait until at least 2 tasks are PROCESSING
+    # Wait until both tasks are in-flight
     _wait_processing(db_url, 2, timeout=15)
 
-    # Request shutdown and wait
+    # Request shutdown while tasks are held in-flight, then release them
     app.request_shutdown()
+    open_gate("graceful-shutdown")
     t.join(30)
     assert not t.is_alive(), "Worker did not shut down"
 
@@ -79,8 +58,8 @@ def test_graceful_shutdown_drains_inflight(db, db_url, run_worker):
     done = db.query(models.Task).filter(
         models.Task.state == models.TaskState.DONE
     ).count()
-    # The 2 slow tasks should have completed (drained)
-    assert done >= 2
+    # Both in-flight tasks drained to completion
+    assert done == 2
 
     # Worker row should be SHUTDOWN
     workers = db.query(models.Worker).filter(
@@ -160,7 +139,7 @@ def test_dead_worker_tasks_rescheduled_by_peer(db, db_url, run_worker):
     run_worker(app, ("thread-tests",))
 
     # The stuck task should be rescheduled and eventually completed
-    _wait_for_state(db_url, models.Task, models.TaskState.DONE, 1, timeout=30)
+    wait_for_task_state(db_url, models.TaskState.DONE, 1, timeout=30)
 
     # Dead worker should be marked as NO_HEARTBEAT
     db.expire_all()

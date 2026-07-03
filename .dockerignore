@@ -1,0 +1,9 @@
+.git/
+.venv/
+__pycache__/
+*.pyc
+.pytest_cache/
+.coverage*
+coverage.xml
+coverage-report.txt
+.workstream-plans/

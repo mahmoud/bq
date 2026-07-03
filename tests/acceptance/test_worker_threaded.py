@@ -12,26 +12,7 @@ from .fixtures.thread_processors import (
     record_thread_name,
     timed_task,
 )
-
-
-def _wait_for_state(db_url, task_model, state, count, timeout=30):
-    """Poll until `count` tasks reach `state`, or timeout."""
-    engine = create_engine(db_url)
-    deadline = time.monotonic() + timeout
-    n = 0
-    while time.monotonic() < deadline:
-        with engine.connect() as conn:
-            result = conn.execute(
-                text(f"SELECT count(*) FROM {task_model.__tablename__} WHERE state = :s"),
-                {"s": state.value},
-            )
-            n = result.scalar()
-            if n >= count:
-                engine.dispose()
-                return n
-        time.sleep(0.3)
-    engine.dispose()
-    raise TimeoutError(f"Only {n}/{count} tasks reached {state} within {timeout}s")
+from .helpers import wait_for_task_state
 
 
 def _make_app(db_url, max_workers=4, poll_timeout=1, batch_size=10):
@@ -60,7 +41,7 @@ def test_concurrent_execution(db, db_url, run_worker):
         db.add(task)
     db.commit()
 
-    _wait_for_state(db_url, models.Task, models.TaskState.DONE, task_count, timeout=30)
+    wait_for_task_state(db_url, models.TaskState.DONE, task_count, timeout=30)
 
     db.expire_all()
     done_tasks = db.query(models.Task).filter(
@@ -81,7 +62,7 @@ def test_session_isolation(db, db_url, run_worker):
         db.add(task)
     db.commit()
 
-    _wait_for_state(db_url, models.Task, models.TaskState.DONE, task_count, timeout=30)
+    wait_for_task_state(db_url, models.TaskState.DONE, task_count, timeout=30)
 
     db.expire_all()
     done_tasks = db.query(models.Task).filter(
@@ -102,7 +83,7 @@ def test_sequential_backward_compat(db, db_url, run_worker):
         db.add(task)
     db.commit()
 
-    _wait_for_state(db_url, models.Task, models.TaskState.DONE, task_count, timeout=30)
+    wait_for_task_state(db_url, models.TaskState.DONE, task_count, timeout=30)
 
     db.expire_all()
     done = db.query(models.Task).filter(
@@ -173,7 +154,7 @@ def test_notify_wakeup_threaded(db, db_url, run_worker):
     engine.dispose()
 
     # Should complete within 10s (not 60s poll timeout)
-    _wait_for_state(db_url, models.Task, models.TaskState.DONE, 1, timeout=10)
+    wait_for_task_state(db_url, models.TaskState.DONE, 1, timeout=10)
 
 
 def test_batch_size_smaller_than_threads(db, db_url, run_worker):
@@ -188,7 +169,7 @@ def test_batch_size_smaller_than_threads(db, db_url, run_worker):
         db.add(task)
     db.commit()
 
-    _wait_for_state(db_url, models.Task, models.TaskState.DONE, task_count, timeout=30)
+    wait_for_task_state(db_url, models.TaskState.DONE, task_count, timeout=30)
 
     db.expire_all()
     done = db.query(models.Task).filter(

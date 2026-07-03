@@ -6,6 +6,7 @@ from sqlalchemy.orm import Session
 
 from .fixtures.processors import app
 from .fixtures.processors import sum
+from .helpers import stop_process
 from bq import models
 from bq.config import Config
 
@@ -46,5 +47,4 @@ def test_process_cmd(db: Session, db_url: str):
         time.sleep(1)
 
     for proc in procs:
-        proc.kill()
-        proc.join(3)
+        stop_process(proc)

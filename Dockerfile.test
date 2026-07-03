@@ -1,0 +1,10 @@
+ARG PYTHON_VERSION=3.11
+FROM python:${PYTHON_VERSION}-slim
+COPY --from=ghcr.io/astral-sh/uv:latest /uv /uvx /usr/local/bin/
+ENV UV_LINK_MODE=copy UV_PROJECT_ENVIRONMENT=/venv
+WORKDIR /app
+COPY pyproject.toml uv.lock ./
+RUN uv sync --frozen --no-install-project
+COPY . .
+RUN uv sync --frozen
+ENTRYPOINT ["./scripts/run-tests.sh"]

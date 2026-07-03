@@ -4,6 +4,7 @@ import typing
 
 import pytest
 from pytest_factoryboy import register
+from sqlalchemy import text
 from sqlalchemy.engine import create_engine
 from sqlalchemy.engine import Engine
 
@@ -70,3 +71,30 @@ def run_worker():
             if app._engine is not None:
                 app._engine.dispose()
         assert not t.is_alive(), "worker failed to shut down gracefully"
+
+
+@pytest.fixture(autouse=True)
+def _reset_gates():
+    yield
+    from .acceptance.fixtures.thread_processors import reset_gates
+
+    reset_gates()
+
+
+@pytest.fixture
+def executions_table(engine: Engine) -> typing.Generator[Engine, None, None]:
+    """Side table tallying every task execution (see record_execution)."""
+    ddl = """
+    CREATE TABLE IF NOT EXISTS test_executions (
+        id BIGSERIAL PRIMARY KEY,
+        task_id UUID NOT NULL,
+        thread_name TEXT NOT NULL,
+        started_at TIMESTAMPTZ NOT NULL DEFAULT clock_timestamp(),
+        finished_at TIMESTAMPTZ
+    )
+    """
+    with engine.begin() as conn:
+        conn.execute(text(ddl))
+    yield engine
+    with engine.begin() as conn:
+        conn.execute(text("DROP TABLE IF EXISTS test_executions"))
