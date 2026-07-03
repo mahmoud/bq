@@ -34,7 +34,9 @@ dependencies = [
 [package.dev-dependencies]
 dev = [
     { name = "psycopg2-binary" },
+    { name = "pytest" },
     { name = "pytest-factoryboy" },
+    { name = "pytest-timeout" },
 ]
 
 [package.metadata]
@@ -50,7 +52,9 @@ requires-dist = [
 [package.metadata.requires-dev]
 dev = [
     { name = "psycopg2-binary", specifier = ">=2.9.10,<3" },
+    { name = "pytest", specifier = ">=8,<9" },
     { name = "pytest-factoryboy", specifier = ">=2.7.0,<3" },
+    { name = "pytest-timeout", specifier = ">=2,<3" },
 ]
 
 [[package]]
@@ -343,6 +347,18 @@ dependencies = [
 sdist = { url = "https://files.pythonhosted.org/packages/a6/bc/179653e8cce651575ac95377e4fdf9afd3c4821ab4bba101aae913ebcc27/pytest_factoryboy-2.7.0.tar.gz", hash = "sha256:67fc54ec8669a3feb8ac60094dd57cd71eb0b20b2c319d2957873674c776a77b", size = 17398, upload-time = "2024-03-05T07:32:12.675Z" }
 wheels = [
     { url = "https://files.pythonhosted.org/packages/c7/56/d3ef25286dc8df9d1da0b325ee4b1b1ffd9736e44f9b30cfbe464e9f4f14/pytest_factoryboy-2.7.0-py3-none-any.whl", hash = "sha256:bf3222db22d954fbf46f4bff902a0a8d82f3fc3594a47c04bbdc0546ff4c59a6", size = 16268, upload-time = "2024-03-05T07:32:09.981Z" },
+]
+
+[[package]]
+name = "pytest-timeout"
+version = "2.4.0"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [
+    { name = "pytest" },
+]
+sdist = { url = "https://files.pythonhosted.org/packages/ac/82/4c9ecabab13363e72d880f2fb504c5f750433b2b6f16e99f4ec21ada284c/pytest_timeout-2.4.0.tar.gz", hash = "sha256:7e68e90b01f9eff71332b25001f85c75495fc4e3a836701876183c4bcfd0540a", size = 17973, upload-time = "2025-05-05T19:44:34.99Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/fa/b6/3127540ecdf1464a00e5a01ee60a1b09175f6913f0644ac748494d9c4b21/pytest_timeout-2.4.0-py3-none-any.whl", hash = "sha256:c42667e5cdadb151aeb5b26d114aff6bdf5a907f176a007a30b940d3d865b5c2", size = 14382, upload-time = "2025-05-05T19:44:33.502Z" },
 ]
 
 [[package]]

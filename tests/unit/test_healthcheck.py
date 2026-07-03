@@ -98,3 +98,17 @@ class TestHealthStateInitialization:
 
     def test_defaults_to_unhealthy(self, bq):
         assert bq._health_state == (False, {})
+
+
+class TestShutdownHealthState:
+    """Tests that shutdown sets the correct health state shape."""
+
+    def test_shutdown_health_state_includes_state_key(self, bq):
+        """PR #1 follow-up: shutdown must include state key for consistent body shape."""
+        bq._health_state = (False, {"state": "SHUTDOWN"})
+        start_response = MagicMock()
+        body = json.loads(
+            bq._serve_http_request("1", _make_environ("/healthz"), start_response)[0]
+        )
+        assert body["status"] == "error"
+        assert body["state"] == "SHUTDOWN"

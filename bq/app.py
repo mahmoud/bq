@@ -78,6 +78,7 @@ class BeanQueue:
         # Health state as atomic tuple: (is_ok, info_dict)
         # Written by heartbeat/main threads, read by HTTP handler threads
         self._health_state: tuple[bool, dict] = (False, {})
+        self._channels: tuple[str, ...] = ()
 
     def _resolve_max_workers(self) -> int:
         """Resolve the effective max worker thread count."""
@@ -97,6 +98,20 @@ class BeanQueue:
     def request_shutdown(self) -> None:
         """Ask a running process_tasks() loop to shut down gracefully."""
         self._worker_update_shutdown_event.set()
+        # Wake the worker from a blocking poll() by sending a NOTIFY on a
+        # listened channel. Uses a fresh connection to avoid thread-safety issues.
+        channels = self._channels
+        if channels:
+            try:
+                conn = self.engine.connect().execution_options(isolation_level="AUTOCOMMIT")
+                try:
+                    identifier_preparer = conn.dialect.identifier_preparer
+                    quoted = identifier_preparer.quote_identifier(channels[0])
+                    conn.exec_driver_sql(f"NOTIFY {quoted}")
+                finally:
+                    conn.close()
+            except Exception:
+                pass  # Best-effort; the event flag will be checked on next loop
 
     def make_session(self) -> DBSession:
         return self.session_cls(bind=self.engine)
@@ -173,91 +188,94 @@ class BeanQueue:
         worker_service = self._make_worker_service(db)
         dispatch_service = self._make_dispatch_service(db)
 
-        current_worker = worker_service.get_worker(worker_id)
-        logger.info(
-            "Updating worker %s with heartbeat_period=%s, heartbeat_timeout=%s",
-            current_worker.id,
-            self.config.WORKER_HEARTBEAT_PERIOD,
-            self.config.WORKER_HEARTBEAT_TIMEOUT,
-        )
-        consecutive_failures = 0
-        while True:
-            try:
-                dead_workers = worker_service.fetch_dead_workers(
-                    timeout=self.config.WORKER_HEARTBEAT_TIMEOUT
-                )
-                task_count = worker_service.reschedule_dead_tasks(
-                    # TODO: a better way to abstract this?
-                    dead_workers.with_entities(current_worker.__class__.id)
-                )
-                found_dead_worker = False
-                for dead_worker in dead_workers:
-                    found_dead_worker = True
-                    logger.info(
-                        "Found dead worker %s (name=%s), reschedule %s dead tasks in channels %s",
-                        dead_worker.id,
-                        dead_worker.name,
-                        task_count,
-                        dead_worker.channels,
-                    )
-                    dispatch_service.notify(dead_worker.channels)
-                if found_dead_worker:
-                    db.commit()
-
-                if current_worker.state != models.WorkerState.RUNNING:
-                    self._health_state = (False, {"state": str(current_worker.state)})
-                    logger.warning(
-                        "Current worker %s state is %s instead of running, quit processing",
-                        current_worker.id,
-                        current_worker.state,
-                    )
-                    self.request_shutdown()
-                    return
-
-                consecutive_failures = 0
-            except Exception:
-                logger.exception(
-                    "Error in heartbeat loop for worker %s", worker_id
-                )
-                db.rollback()
-                consecutive_failures += 1
-                if consecutive_failures >= 3:
-                    self._health_state = (False, {"state": "HEARTBEAT_ERROR"})
-                    logger.error(
-                        "Heartbeat failed %d consecutive times, shutting down",
-                        consecutive_failures,
-                    )
-                    self.request_shutdown()
-                    return
-
-            do_shutdown = self._worker_update_shutdown_event.wait(
-                self.config.WORKER_HEARTBEAT_PERIOD
+        try:
+            current_worker = worker_service.get_worker(worker_id)
+            logger.info(
+                "Updating worker %s with heartbeat_period=%s, heartbeat_timeout=%s",
+                current_worker.id,
+                self.config.WORKER_HEARTBEAT_PERIOD,
+                self.config.WORKER_HEARTBEAT_TIMEOUT,
             )
-            if do_shutdown:
-                return
-
-            try:
-                current_worker.last_heartbeat = func.now()
-                db.add(current_worker)
-                db.commit()
-                self._health_state = (
-                    current_worker.state == models.WorkerState.RUNNING,
-                    {"state": str(current_worker.state)},
-                )
-            except Exception:
-                logger.exception(
-                    "Error updating heartbeat for worker %s", worker_id
-                )
-                db.rollback()
-                consecutive_failures += 1
-                if consecutive_failures >= 3:
-                    self._health_state = (False, {"state": "HEARTBEAT_ERROR"})
-                    logger.error(
-                        "Heartbeat failed %d consecutive times, shutting down",
-                        consecutive_failures,
+            consecutive_failures = 0
+            while True:
+                try:
+                    dead_workers = worker_service.fetch_dead_workers(
+                        timeout=self.config.WORKER_HEARTBEAT_TIMEOUT
                     )
-                    self.request_shutdown()
+                    task_count = worker_service.reschedule_dead_tasks(
+                        # TODO: a better way to abstract this?
+                        dead_workers.with_entities(current_worker.__class__.id)
+                    )
+                    found_dead_worker = False
+                    for dead_worker in dead_workers:
+                        found_dead_worker = True
+                        logger.info(
+                            "Found dead worker %s (name=%s), reschedule %s dead tasks in channels %s",
+                            dead_worker.id,
+                            dead_worker.name,
+                            task_count,
+                            dead_worker.channels,
+                        )
+                        dispatch_service.notify(dead_worker.channels)
+                    if found_dead_worker:
+                        db.commit()
+
+                    if current_worker.state != models.WorkerState.RUNNING:
+                        self._health_state = (False, {"state": str(current_worker.state)})
+                        logger.warning(
+                            "Current worker %s state is %s instead of running, quit processing",
+                            current_worker.id,
+                            current_worker.state,
+                        )
+                        self.request_shutdown()
+                        return
+
+                    consecutive_failures = 0
+                except Exception:
+                    logger.exception(
+                        "Error in heartbeat loop for worker %s", worker_id
+                    )
+                    db.rollback()
+                    consecutive_failures += 1
+                    if consecutive_failures >= 3:
+                        self._health_state = (False, {"state": "HEARTBEAT_ERROR"})
+                        logger.error(
+                            "Heartbeat failed %d consecutive times, shutting down",
+                            consecutive_failures,
+                        )
+                        self.request_shutdown()
+                        return
+
+                do_shutdown = self._worker_update_shutdown_event.wait(
+                    self.config.WORKER_HEARTBEAT_PERIOD
+                )
+                if do_shutdown:
                     return
+
+                try:
+                    current_worker.last_heartbeat = func.now()
+                    db.add(current_worker)
+                    db.commit()
+                    self._health_state = (
+                        current_worker.state == models.WorkerState.RUNNING,
+                        {"state": str(current_worker.state)},
+                    )
+                except Exception:
+                    logger.exception(
+                        "Error updating heartbeat for worker %s", worker_id
+                    )
+                    db.rollback()
+                    consecutive_failures += 1
+                    if consecutive_failures >= 3:
+                        self._health_state = (False, {"state": "HEARTBEAT_ERROR"})
+                        logger.error(
+                            "Heartbeat failed %d consecutive times, shutting down",
+                            consecutive_failures,
+                        )
+                        self.request_shutdown()
+                        return
+        finally:
+            db.close()
 
     def _serve_http_request(
         self, worker_id: typing.Any, environ: dict, start_response: typing.Callable
@@ -517,6 +535,7 @@ class BeanQueue:
         db = self.make_session()
         if not channels:
             channels = [constants.DEFAULT_CHANNEL]
+        self._channels = tuple(channels)
 
         if not self.config.PROCESSOR_PACKAGES:
             logger.error("No PROCESSOR_PACKAGES provided")

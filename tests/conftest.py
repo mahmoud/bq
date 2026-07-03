@@ -1,4 +1,5 @@
 import os
+import threading
 import typing
 
 import pytest
@@ -36,3 +37,36 @@ def db(engine: Engine) -> typing.Generator[Session, None, None]:
     finally:
         Session.remove()
     Base.metadata.drop_all(bind=engine)
+
+
+@pytest.fixture
+def run_worker():
+    """Factory: run app.process_tasks(channels) in a daemon thread; graceful teardown."""
+    started = []
+
+    def start(app, channels):
+        t = threading.Thread(
+            target=app.process_tasks,
+            kwargs=dict(channels=channels),
+            daemon=True,
+        )
+        t.start()
+        started.append((app, t))
+        return t
+
+    yield start
+
+    for app, t in started:
+        app.request_shutdown()
+        t.join(10)
+        if t.is_alive():
+            # Worker stuck — dispose engine to break any DB-level hangs,
+            # then re-join briefly.
+            if app._engine is not None:
+                app._engine.dispose()
+            t.join(5)
+        else:
+            # Clean case: dispose after join to release pooled connections.
+            if app._engine is not None:
+                app._engine.dispose()
+        assert not t.is_alive(), "worker failed to shut down gracefully"

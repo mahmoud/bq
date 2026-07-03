@@ -118,3 +118,32 @@ def test_poll(db: Session, dispatch_service: DispatchService):
     db.commit()
     notifications = list(dispatch_service.poll(timeout=1))
     assert frozenset([n.channel for n in notifications]) == frozenset(["a", "c"])
+
+
+def test_listen_and_poll_with_explicit_connection(db: Session, engine):
+    """listen/poll honor explicit connection= kwarg (dedicated notification conn)."""
+    dispatch_service = DispatchService(db)
+
+    # Open a second connection in AUTOCOMMIT mode (like BeanQueue does)
+    conn2 = engine.connect().execution_options(isolation_level="AUTOCOMMIT")
+    try:
+        dispatch_service.listen(["x"], connection=conn2)
+
+        # Notify via the session (transactional)
+        dispatch_service.notify(["x"])
+        db.commit()
+
+        # Poll on the dedicated connection should receive the notification
+        notifications = list(dispatch_service.poll(timeout=5, connection=conn2))
+        assert len(notifications) >= 1
+        assert notifications[0].channel == "x"
+    finally:
+        conn2.close()
+
+
+def test_poll_without_connection_kwarg_still_works(db: Session, dispatch_service: DispatchService):
+    """poll(timeout=0) without connection= uses session connection, raises TimeoutError."""
+    dispatch_service.listen(["timeout-test"])
+    db.commit()
+    with pytest.raises(TimeoutError):
+        list(dispatch_service.poll(timeout=0))
