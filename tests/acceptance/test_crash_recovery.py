@@ -206,6 +206,7 @@ def test_task_session_killed_resets_task_and_reexecutes(
         message="execution never started",
     )
 
+    # GoodTurn: https://goodturn.ai/p/gtp_01kwmzvc1ef1d8d010e4rcqgsa
     # Kill the task thread's session backend while the func sleeps in-flight.
     # Its last statement is the ORM task-fetch: SELECT ... FROM bq_tasks
     # WHERE bq_tasks.id = ...; every other backend last ran COMMIT, a
