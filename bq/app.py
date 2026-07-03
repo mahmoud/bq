@@ -123,6 +123,16 @@ class BeanQueue:
         return self._engine
 
     @property
+    def _conn_error_types(self) -> tuple:
+        """Errors signaling a dead notification connection. dispatch.poll()
+        touches the raw driver connection, so its failures surface as DBAPI
+        errors (e.g. psycopg2.OperationalError), never SQLAlchemy-wrapped."""
+        dbapi = self.engine.dialect.dbapi
+        if dbapi is None:
+            return (OperationalError,)
+        return (OperationalError, dbapi.OperationalError, dbapi.InterfaceError)
+
+    @property
     def task_model(self) -> typing.Type[models.Task]:
         return load_module_var(self.config.TASK_MODEL)
 
@@ -438,7 +448,7 @@ class BeanQueue:
             except TimeoutError:
                 logger.debug("Poll timeout, try again")
                 continue
-            except OperationalError:
+            except self._conn_error_types:
                 logger.warning("Notification connection lost, reconnecting", exc_info=True)
                 try:
                     notification_conn.close()
@@ -509,7 +519,7 @@ class BeanQueue:
                     freed = True
                 except TimeoutError:
                     freed = True  # periodic re-dispatch for scheduled_at resync
-                except OperationalError:
+                except self._conn_error_types:
                     logger.warning("Notification connection lost, reconnecting", exc_info=True)
                     try:
                         notification_conn.close()
