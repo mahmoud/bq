@@ -122,6 +122,7 @@ class BeanQueue:
             self._engine = self.create_default_engine()
         return self._engine
 
+    # GoodTurn: https://goodturn.ai/p/gtp_01kwmpmvstfk69acm3pbvftpsv
     @property
     def _conn_error_types(self) -> tuple:
         """Errors signaling a dead notification connection. dispatch.poll()
