@@ -176,3 +176,33 @@ def test_batch_size_smaller_than_threads(db, db_url, run_worker):
         models.Task.state == models.TaskState.DONE
     ).all()
     assert len(done) == task_count
+
+
+def test_missing_processor_marks_task_failed(db, db_url, run_worker):
+    """A task naming an unregistered function is FAILED with an error event.
+
+    Real operational scenario: a deploy removes (or renames) a processor
+    while tasks referencing it are still queued.
+    """
+    app = _make_app(db_url)
+    run_worker(app, ("thread-tests",))
+
+    task = models.Task(
+        channel="thread-tests",
+        module="tests.acceptance.fixtures.thread_processors",
+        func_name="nonexistent_processor",
+        kwargs={},
+    )
+    db.add(task)
+    db.commit()
+
+    wait_for_task_state(db_url, models.TaskState.FAILED, 1, timeout=15)
+
+    db.expire_all()
+    row = db.query(models.Task).filter(models.Task.id == task.id).one()
+    assert row.state == models.TaskState.FAILED
+    assert "Cannot find processor" in row.error_message
+    events = db.query(models.Event).filter(models.Event.task_id == task.id).all()
+    assert len(events) == 1
+    assert events[0].type == models.EventType.FAILED
+    assert "Cannot find processor" in events[0].error_message

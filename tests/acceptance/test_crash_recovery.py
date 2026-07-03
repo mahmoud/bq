@@ -166,13 +166,90 @@ def test_sigkill_worker_task_rescheduled_and_reexecuted(
     assert db.get(models.Worker, dead_worker_id).state == models.WorkerState.NO_HEARTBEAT
 
 
-def test_listen_connection_killed_reconnects_when_idle(db, db_url, engine, run_worker):
+def test_task_session_killed_resets_task_and_reexecutes(
+    db, db_url, run_worker, executions_table
+):
+    """Contract: infra failure in the thread path resets the task to PENDING.
+
+    A record_execution task sleeps in-flight; its task-thread session backend
+    is terminated (identifiable: its last statement is the task-fetch SELECT
+    from _process_task_in_thread — begin_nested's SAVEPOINT is emitted lazily
+    and never fires since the func only touches its own autocommit engine).
+    The processor function still finishes — the tally rides that side
+    engine — but the task session's commit fails, so
+    _process_task_in_thread must reset the task to PENDING via a fresh
+    session. The worker then re-dispatches and re-executes it to DONE.
+    Exactly 2 finished executions prove the reset path ran.
+    """
+    engine = executions_table
+    worker_app = _make_app(db_url)
+    run_worker(worker_app, ("thread-tests",))
+
+    task = record_execution.run(value=5, sleep_time=3)
+    db.add(task)
+    db.commit()
+    task_id = task.id
+    # Reading task.id above refreshed the row, leaving this session's backend
+    # with the same SELECT shape the kill below targets — end its transaction
+    # so its last statement is ROLLBACK and only the worker's backend matches.
+    db.rollback()
+
+    wait_until(
+        lambda: engine.connect()
+        .execute(
+            text("SELECT count(*) FROM test_executions WHERE task_id = :tid"),
+            {"tid": str(task_id)},
+        )
+        .scalar()
+        >= 1,
+        timeout=15,
+        message="execution never started",
+    )
+
+    # Kill the task thread's session backend while the func sleeps in-flight.
+    # Its last statement is the ORM task-fetch: SELECT ... FROM bq_tasks
+    # WHERE bq_tasks.id = ...; every other backend last ran COMMIT, a
+    # dispatch UPDATE, or a bq_workers statement.
+    killed = terminate_backends(db_url, "SELECT%FROM bq_tasks%WHERE bq_tasks.id =%")
+    assert len(killed) >= 1
+
+    def task_done():
+        with engine.connect() as conn:
+            state = conn.execute(
+                text("SELECT state FROM bq_tasks WHERE id = :tid"),
+                {"tid": str(task_id)},
+            ).scalar()
+        return state == "DONE"
+
+    wait_until(task_done, timeout=30, message="task was not reset and re-executed")
+
+    with engine.connect() as conn:
+        executions = conn.execute(
+            text(
+                "SELECT finished_at FROM test_executions"
+                " WHERE task_id = :tid ORDER BY id"
+            ),
+            {"tid": str(task_id)},
+        ).all()
+    assert len(executions) == 2, f"expected 2 executions, got {executions}"
+    assert all(row[0] is not None for row in executions), (
+        "both executions run to completion; only the task session dies"
+    )
+
+
+@pytest.mark.parametrize("max_threads", [1, 2], ids=["sequential", "threaded"])
+def test_listen_connection_killed_reconnects_when_idle(
+    db, db_url, engine, run_worker, max_threads
+):
     """Regression: the dedicated LISTEN connection reconnects after backend death.
 
-    POLL_TIMEOUT=60 so a pass cannot be periodic polling in disguise: the
-    task only completes quickly if NOTIFY arrives on the *new* connection.
+    Parametrized over both worker loops — _process_tasks_sequential
+    (MAX_WORKER_THREADS=1) and _process_tasks_threaded — which carry twin
+    reconnect handlers. POLL_TIMEOUT=60 so a pass cannot be periodic polling
+    in disguise: the task only completes quickly if NOTIFY arrives on the
+    *new* connection.
     """
-    worker_app = _make_app(db_url, POLL_TIMEOUT=60)
+    worker_app = _make_app(db_url, POLL_TIMEOUT=60, MAX_WORKER_THREADS=max_threads)
     run_worker(worker_app, ("thread-tests",))
 
     def listener_pids():
