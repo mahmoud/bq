@@ -1,0 +1,36 @@
+name: test
+on:
+  push:
+  pull_request:
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - {python: "3.11", pg: "16.3"}   # parity with upstream CircleCI leg
+          - {python: "3.12", pg: "16.3"}
+          - {python: "3.13", pg: "16.3"}
+          - {python: "3.12", pg: "13"}
+          - {python: "3.12", pg: "17"}
+    env:
+      PYTHON_VERSION: ${{ matrix.python }}
+      PG_VERSION: ${{ matrix.pg }}
+    steps:
+      - uses: actions/checkout@v4
+      - run: docker compose build test
+      - run: docker compose run --rm test
+      - name: Coverage to job summary
+        if: always()
+        run: |
+          { echo '```'; cat coverage-report.txt; echo '```'; } >> "$GITHUB_STEP_SUMMARY" || true
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: coverage-py${{ matrix.python }}-pg${{ matrix.pg }}
+          path: |
+            coverage.xml
+            coverage-report.txt
+      - run: docker compose down -v
+        if: always()

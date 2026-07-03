@@ -32,6 +32,9 @@ def engine(db_url: str) -> Engine:
 @pytest.fixture
 def db(engine: Engine) -> typing.Generator[Session, None, None]:
     Session.configure(bind=engine)
+    # Drop first: leftover state from aborted runs or scripts/soak.py on the
+    # shared test DB must never leak into a test.
+    Base.metadata.drop_all(bind=engine)
     Base.metadata.create_all(bind=engine)
     try:
         yield Session
@@ -83,9 +86,13 @@ def _reset_gates():
 
 @pytest.fixture
 def executions_table(engine: Engine) -> typing.Generator[Engine, None, None]:
-    """Side table tallying every task execution (see record_execution)."""
+    """Side table tallying every task execution (see record_execution).
+
+    Dropped and recreated so leftover rows (e.g. from scripts/soak.py on the
+    shared test DB) never leak into a test.
+    """
     ddl = """
-    CREATE TABLE IF NOT EXISTS test_executions (
+    CREATE TABLE test_executions (
         id BIGSERIAL PRIMARY KEY,
         task_id UUID NOT NULL,
         thread_name TEXT NOT NULL,
@@ -94,6 +101,7 @@ def executions_table(engine: Engine) -> typing.Generator[Engine, None, None]:
     )
     """
     with engine.begin() as conn:
+        conn.execute(text("DROP TABLE IF EXISTS test_executions"))
         conn.execute(text(ddl))
     yield engine
     with engine.begin() as conn:

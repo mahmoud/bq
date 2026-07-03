@@ -128,17 +128,37 @@ def test_sigkill_worker_task_rescheduled_and_reexecuted(
     )
     run_worker(rescuer, ("thread-tests",))
 
-    wait_for_task_state(db_url, models.TaskState.DONE, 1, timeout=30)
+    def task_done():
+        with engine.connect() as conn:
+            state = conn.execute(
+                text("SELECT state FROM bq_tasks WHERE id = :tid"),
+                {"tid": str(task_id)},
+            ).scalar()
+        return state == "DONE"
+
+    wait_until(task_done, timeout=30, message="task never re-executed to DONE")
 
     with engine.connect() as conn:
         executions = conn.execute(
             text(
-                "SELECT finished_at FROM test_executions"
+                "SELECT finished_at, thread_name FROM test_executions"
                 " WHERE task_id = :tid ORDER BY id"
             ),
             {"tid": str(task_id)},
         ).all()
-    assert len(executions) == 2, f"expected 2 executions, got {executions}"
+        # Forensics on failure: who did what, in event order
+        events = conn.execute(
+            text(
+                "SELECT type, created_at, error_message FROM bq_events"
+                " WHERE task_id = :tid ORDER BY created_at"
+            ),
+            {"tid": str(task_id)},
+        ).all()
+        workers = conn.execute(
+            text("SELECT id, state, last_heartbeat FROM bq_workers")
+        ).all()
+    forensics = f"executions={executions} events={events} workers={workers}"
+    assert len(executions) == 2, f"expected 2 executions; {forensics}"
     assert executions[0][0] is None, "killed execution must stay unfinished"
     assert executions[1][0] is not None, "re-execution must have finished"
 
