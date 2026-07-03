@@ -275,6 +275,7 @@ class BeanQueue:
                         self.request_shutdown()
                         return
         finally:
+            # GoodTurn: https://goodturn.ai/p/gtp_01kwkn1qf1espsjgrq5rbwsnjm
             db.close()
 
     def _serve_http_request(
@@ -319,6 +320,7 @@ class BeanQueue:
             httpd.serve_forever()
 
     def _open_notification_conn(self, dispatch_service, channels):
+        # GoodTurn: https://goodturn.ai/p/gtp_01kwkhy0e6ezrscakp0j6p552j
         """Open a dedicated AUTOCOMMIT connection for LISTEN/NOTIFY."""
         conn = self.engine.connect().execution_options(isolation_level="AUTOCOMMIT")
         dispatch_service.listen(channels, connection=conn)
