@@ -1,6 +1,6 @@
 [project]
 name = "beanqueue"
-version = "1.2.0"
+version = "2.0.0rc0"
 description = "BeanQueue or BQ for short, PostgreSQL SKIP LOCK and SQLAlchemy based worker queue library"
 authors = [{ name = "Fang-Pen Lin", email = "fangpen@launchplatform.com" }]
 requires-python = ">=3.11,<4"
@@ -18,6 +18,12 @@ dependencies = [
 [project.scripts]
 bq = "bq.cmds.main:cli"
 
+[project.optional-dependencies]
+metrics = [
+    "starlette>=0.27,<2",
+    "uvicorn>=0.30.0,<1",
+]
+
 [dependency-groups]
 dev = [
     "psycopg2-binary>=2.9.10,<3",
@@ -25,6 +31,9 @@ dev = [
     "pytest-factoryboy>=2.7.0,<3",
     "pytest-timeout>=2,<3",
     "coverage>=7.10,<8",
+    "starlette>=0.27,<2",
+    "uvicorn>=0.30.0,<1",
+    "httpx>=0.27.0,<1",
 ]
 
 [tool.hatch.build.targets.sdist]

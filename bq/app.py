@@ -1,10 +1,8 @@
 import functools
 import importlib
-import json
 import logging
 import os
 import platform
-import socketserver
 import threading
 import time
 import typing
@@ -13,9 +11,7 @@ from concurrent.futures import ThreadPoolExecutor
 from concurrent.futures import wait as futures_wait
 from importlib.metadata import PackageNotFoundError
 from importlib.metadata import version
-from wsgiref.simple_server import make_server
-from wsgiref.simple_server import WSGIRequestHandler
-from wsgiref.simple_server import WSGIServer
+
 
 import venusian
 from sqlalchemy import func
@@ -23,7 +19,6 @@ from sqlalchemy.engine import create_engine
 from sqlalchemy.engine import Engine
 from sqlalchemy.exc import OperationalError
 from sqlalchemy.orm import Session as DBSession
-from sqlalchemy.pool import NullPool
 from sqlalchemy.pool import QueuePool
 
 from . import constants
@@ -31,6 +26,7 @@ from . import events
 from . import models
 from .config import Config
 from .db.session import SessionMaker
+from .metrics import MetricsServer
 from .processors.processor import Processor
 from .processors.processor import ProcessorHelper
 from .processors.registry import collect
@@ -41,22 +37,6 @@ from .utils import load_module_var
 logger = logging.getLogger(__name__)
 
 
-class WSGIRequestHandlerWithLogger(WSGIRequestHandler):
-    logger = logging.getLogger("metrics_server")
-
-    def log_message(self, format, *args):
-        message = format % args
-        self.logger.info(
-            "%s - - [%s] %s\n"
-            % (
-                self.address_string(),
-                self.log_date_time_string(),
-                message.translate(self._control_char_table),
-            )
-        )
-
-class ThreadingWSGIServer(socketserver.ThreadingMixIn, WSGIServer):
-    daemon_threads = True
 
 class BeanQueue:
     def __init__(
@@ -73,11 +53,7 @@ class BeanQueue:
         self.dispatch_service_cls = dispatch_service_cls
         self._engine = engine
         self._worker_update_shutdown_event: threading.Event = threading.Event()
-        # noop if metrics thread is not started yet, shutdown if it is started
-        self._metrics_server_shutdown: typing.Callable[[], None] = lambda: None
-        # Health state as atomic tuple: (is_ok, info_dict)
-        # Written by heartbeat/main threads, read by HTTP handler threads
-        self._health_state: tuple[bool, dict] = (False, {})
+        self._metrics_server: MetricsServer | None = None
         self._channels: tuple[str, ...] = ()
 
     def _resolve_max_workers(self) -> int:
@@ -232,7 +208,6 @@ class BeanQueue:
                         db.commit()
 
                     if current_worker.state != models.WorkerState.RUNNING:
-                        self._health_state = (False, {"state": str(current_worker.state)})
                         logger.warning(
                             "Current worker %s state is %s instead of running, quit processing",
                             current_worker.id,
@@ -249,7 +224,6 @@ class BeanQueue:
                     db.rollback()
                     consecutive_failures += 1
                     if consecutive_failures >= 3:
-                        self._health_state = (False, {"state": "HEARTBEAT_ERROR"})
                         logger.error(
                             "Heartbeat failed %d consecutive times, shutting down",
                             consecutive_failures,
@@ -267,10 +241,6 @@ class BeanQueue:
                     current_worker.last_heartbeat = func.now()
                     db.add(current_worker)
                     db.commit()
-                    self._health_state = (
-                        current_worker.state == models.WorkerState.RUNNING,
-                        {"state": str(current_worker.state)},
-                    )
                 except Exception:
                     logger.exception(
                         "Error updating heartbeat for worker %s", worker_id
@@ -278,7 +248,6 @@ class BeanQueue:
                     db.rollback()
                     consecutive_failures += 1
                     if consecutive_failures >= 3:
-                        self._health_state = (False, {"state": "HEARTBEAT_ERROR"})
                         logger.error(
                             "Heartbeat failed %d consecutive times, shutting down",
                             consecutive_failures,
@@ -288,47 +257,6 @@ class BeanQueue:
         finally:
             # GoodTurn: https://goodturn.ai/p/gtp_01kwkn1qf1espsjgrq5rbwsnjm
             db.close()
-
-    def _serve_http_request(
-        self, worker_id: typing.Any, environ: dict, start_response: typing.Callable
-    ) -> list[bytes]:
-        path = environ["PATH_INFO"]
-        if path == "/healthz":
-            health_ok, health_info = self._health_state
-            if health_ok:
-                start_response("200 OK", [("Content-Type", "application/json")])
-                return [json.dumps(dict(
-                    status="ok",
-                    worker_id=str(worker_id),
-                    **health_info,
-                )).encode("utf8")]
-            else:
-                start_response(
-                    "500 Internal Server Error",
-                    [("Content-Type", "application/json")],
-                )
-                return [json.dumps(dict(
-                    status="error",
-                    worker_id=str(worker_id),
-                    **health_info,
-                )).encode("utf8")]
-        start_response("404 NOT FOUND", [("Content-Type", "application/json")])
-        return [json.dumps(dict(status="not found")).encode("utf8")]
-
-    def run_metrics_http_server(self, worker_id: typing.Any):
-        host = self.config.METRICS_HTTP_SERVER_INTERFACE
-        port = self.config.METRICS_HTTP_SERVER_PORT
-        with make_server(
-            host,
-            port,
-            functools.partial(self._serve_http_request, worker_id),
-            handler_class=WSGIRequestHandlerWithLogger,
-            server_class=ThreadingWSGIServer,
-        ) as httpd:
-            # expose graceful shutdown to the main thread
-            self._metrics_server_shutdown = httpd.shutdown
-            logger.info("Run metrics HTTP server on %s:%s", host, port)
-            httpd.serve_forever()
 
     def _open_notification_conn(self, dispatch_service, channels):
         # GoodTurn: https://goodturn.ai/p/gtp_01kwkhy0e6ezrscakp0j6p552j
@@ -348,7 +276,6 @@ class BeanQueue:
         except Exception:
             logger.warning("Error draining notifications, will reconnect", exc_info=True)
             return False
-
     def _process_task_in_thread(
         self,
         task_id: typing.Any,
@@ -575,22 +502,13 @@ class BeanQueue:
         worker = work_service.make_worker(name=platform.node(), channels=channels)
         db.add(worker)
         db.commit()
-        self._health_state = (True, {"state": "RUNNING"})
 
         # Open dedicated notification connection (fixes LISTEN-lost-with-QueuePool)
         notification_conn = self._open_notification_conn(dispatch_service, channels)
 
-        metrics_server_thread = None
         if self.config.METRICS_HTTP_SERVER_ENABLED:
-            WSGIRequestHandlerWithLogger.logger.setLevel(
-                self.config.METRICS_HTTP_SERVER_LOG_LEVEL
-            )
-            metrics_server_thread = threading.Thread(
-                target=self.run_metrics_http_server,
-                args=(worker.id,),
-            )
-            metrics_server_thread.daemon = True
-            metrics_server_thread.start()
+            self._metrics_server = MetricsServer(self, worker.id)
+            self._metrics_server.start()
 
         logger.info("Created worker %s, name=%s", worker.id, worker.name)
         events.worker_init.send(self, worker=worker)
@@ -643,7 +561,6 @@ class BeanQueue:
                 )
         except (SystemExit, KeyboardInterrupt):
             db.rollback()
-            self._health_state = (False, {"state": "SHUTDOWN"})
             logger.info("Shutting down ...")
 
             # Shutdown the executor if it was created
@@ -654,9 +571,8 @@ class BeanQueue:
 
             self._worker_update_shutdown_event.set()
             worker_update_thread.join(5)
-            if metrics_server_thread is not None:
-                self._metrics_server_shutdown()
-                metrics_server_thread.join(1)
+            if self._metrics_server is not None:
+                self._metrics_server.shutdown()
 
         # Best-effort close of notification connection
         try:
